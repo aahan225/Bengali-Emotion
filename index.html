@@ -1703,6 +1703,13 @@ body.cinema-widescreen section {
       <source src="https://archive.org/download/Mahalaya/Mahalaya.mp3" type="audio/mpeg">
       <source src="https://ia800306.us.archive.org/0/items/Mahalaya/Mahalaya.mp3" type="audio/mpeg">
     </audio>
+    <!-- Sharodo stage: TWO copies of the same file power the gapless A/B loop -->
+    <audio id="sharodo-audio-a" preload="auto" playsinline webkit-playsinline>
+      <source src="Shishire%20Shishire%20Sharodo%20Akashe.mp3" type="audio/mpeg">
+    </audio>
+    <audio id="sharodo-audio-b" preload="auto" playsinline webkit-playsinline>
+      <source src="Shishire%20Shishire%20Sharodo%20Akashe.mp3" type="audio/mpeg">
+    </audio>
     <audio id="ambient-audio" loop preload="auto" playsinline webkit-playsinline>
       <source src="dhak.mp3" type="audio/mpeg">
     </audio>
@@ -3709,10 +3716,21 @@ body.cinema-widescreen section {
   });
 
   /* ========================================================
-     16. CROSS-DEVICE BULLETPROOF AUDIO ENGINE (MOBILE & DESKTOP)
+     16. CINEMATIC THREE-STAGE SOUNDTRACK ENGINE
+     --------------------------------------------------------
+     Stage 1 (opening -> #bengal-durga)      : Mahalaya chant
+     Stage 2 (#bengal-durga -> #pandal)      : Shishire Shishire Sharodo Akashe
+                                               (gapless A/B loop, inaudible restart)
+     Stage 3 (#pandal -> end)                : Dhak
+     Crossfades are driven by scroll position through wide,
+     equal-power curves with gain smoothing (attack/release),
+     so the listener can never hear a track "switch" -- the
+     music simply morphs as the story moves.
      ======================================================== */
   var ambientAudio = document.getElementById('ambient-audio');
   var chantAudio = document.getElementById('chant-audio');
+  var sharodoA = document.getElementById('sharodo-audio-a');
+  var sharodoB = document.getElementById('sharodo-audio-b');
   var chantHasSeeked = false;
   var isAudioPlaying = false;
   var isAudioMuted = false;
@@ -3720,6 +3738,159 @@ body.cinema-widescreen section {
   var audioToggleBtn = document.getElementById('audio-toggle-btn');
   var audioIcon = document.getElementById('audio-icon');
   var audioStateText = document.getElementById('audio-state-text');
+
+  var CHANT_VOL   = 0.8;   // Mahalaya level
+  var SHARODO_VOL = 0.78; // Sharodo song level
+  var DHAK_VOL    = 0.42;  // Dhak level
+  var MIX_TAU     = 1500;  // crossfade glide time constant (ms)
+  var MASTER_TAU  = 320;   // mute / unmute glide (ms)
+
+  function clamp01(v){ return v < 0 ? 0 : (v > 1 ? 1 : v); }
+  function smoothstep(u){ u = clamp01(u); return u * u * (3 - 2 * u); }
+
+  function setPlaying(el, want){
+    if(!el) return;
+    if(want && el.paused){
+      var p = el.play();
+      if(p && p.catch) p.catch(function(){});
+    } else if(!want && !el.paused){
+      try{ el.pause(); }catch(e){}
+    }
+  }
+
+  function getScrollY(){
+    var y = window.scrollY || document.documentElement.scrollTop;
+    if (typeof lenis !== 'undefined' && lenis && typeof lenis.scroll === 'number') {
+      y = lenis.scroll;
+    }
+    return y;
+  }
+
+  function sectionAbsY(id){
+    var el = document.getElementById(id);
+    if(!el) return 0;
+    var r = el.getBoundingClientRect();
+    return r.top + (window.scrollY || document.documentElement.scrollTop);
+  }
+
+  /* Stage weights from the viewport centre.
+     t1 = chant -> sharodo blend (around #bengal-durga),
+     t2 = sharodo -> dhak blend (around #pandal). */
+  function stageWeights(){
+    var center = getScrollY() + window.innerHeight * 0.5;
+    var w = Math.max(window.innerHeight * 1.15, 420);
+    var t1 = smoothstep((center - sectionAbsY('bengal-durga')) / w);
+    var t2 = smoothstep((center - sectionAbsY('pandal')) / w);
+    return { t1: t1, t2: t2 };
+  }
+
+  /* ---- Gapless A/B loop for the Sharodo song ------------------------------
+     Two elements hold the same file. While one plays the outro,
+     the other starts the intro and an equal-power crossfade
+     bridges them, so the loop restart is physically inaudible. */
+  var sharodoLoop = {
+    active: sharodoA, standby: sharodoB,
+    FADE: 3.0,    // seconds of outro->intro crossfade
+    LEAD: 3.4,    // seconds before the end when the swap is armed
+    xStart: -1,   // currentTime when the current crossfade began
+    arm: function(){
+      if(this.xStart >= 0) return;
+      var d = this.active.duration;
+      if(!d || !isFinite(d)) return;
+      if(d - this.active.currentTime <= this.LEAD){
+        this.xStart = this.active.currentTime;
+        try{ this.standby.currentTime = 0; }catch(e){}
+        setPlaying(this.standby, true);
+      }
+    },
+    step: function(){
+      if(this.xStart >= 0 && (this.active.currentTime - this.xStart) >= this.FADE){
+        var done = this.active;
+        this.active = this.standby;
+        this.standby = done;
+        this.xStart = -1;
+        try{ done.pause(); done.currentTime = 0; }catch(e){}
+      }
+    },
+    gains: function(){
+      if(this.xStart < 0) return (this.active === sharodoA) ? {a:1, b:0} : {a:0, b:1};
+      var p = clamp01((this.active.currentTime - this.xStart) / this.FADE);
+      var g1 = Math.cos(p * Math.PI / 2);
+      var g2 = Math.sin(p * Math.PI / 2);
+      return (this.active === sharodoA) ? {a:g1, b:g2} : {a:g2, b:g1};
+    }
+  };
+
+  /* Safety net: if a copy still reaches its very end, jump to the other. */
+  function sharodoEnded(el){
+    if(sharodoLoop.active !== el) return;
+    var other = (el === sharodoA) ? sharodoB : sharodoA;
+    sharodoLoop.active = other;
+    sharodoLoop.standby = el;
+    sharodoLoop.xStart = -1;
+    try{ other.currentTime = 0; }catch(e){}
+    setPlaying(other, true);
+  }
+  if(sharodoA) sharodoA.addEventListener('ended', function(){ sharodoEnded(sharodoA); });
+  if(sharodoB) sharodoB.addEventListener('ended', function(){ sharodoEnded(sharodoB); });
+
+  /* ---- Live mixer: targets from scroll, smoothed glide, volume apply ---- */
+  var chantCur = 0, sharodoCur = 0, dhakCur = 0, masterCur = 1, lastFrameT = 0;
+
+  function applyVolumes(){
+    var g = sharodoLoop.gains();
+    try{ if(chantAudio)   chantAudio.volume   = clamp01(chantCur   * masterCur); }catch(e){}
+    try{ if(sharodoA)     sharodoA.volume     = clamp01(sharodoCur * masterCur * g.a); }catch(e){}
+    try{ if(sharodoB)     sharodoB.volume     = clamp01(sharodoCur * masterCur * g.b); }catch(e){}
+    try{ if(ambientAudio) ambientAudio.volume = clamp01(dhakCur    * masterCur); }catch(e){}
+  }
+
+  function mixerFrame(now){
+    requestAnimationFrame(mixerFrame);
+    var dt = lastFrameT ? Math.min(now - lastFrameT, 100) : 16;
+    lastFrameT = now;
+
+    var t = stageWeights();
+    var tgChant   = (1 - t.t1) * CHANT_VOL;
+    var tgSharodo = t.t1 * (1 - t.t2) * SHARODO_VOL;
+    var tgDhak    = t.t2 * DHAK_VOL;
+
+    var k  = 1 - Math.exp(-dt / MIX_TAU);
+    var km = 1 - Math.exp(-dt / MASTER_TAU);
+    chantCur   += (tgChant   - chantCur)   * k;
+    sharodoCur += (tgSharodo - sharodoCur) * k;
+    dhakCur    += (tgDhak    - dhakCur)    * k;
+    masterCur  += ((isAudioMuted ? 0 : 1) - masterCur) * km;
+
+    applyVolumes();
+
+    /* Start / stop each stage so only audible tracks play.
+       Muted tracks keep running at zero volume, so unmuting
+       resumes exactly in place -- no jump, no restart. */
+    setPlaying(chantAudio, tgChant > 0.004);
+    var sharodoOn = tgSharodo > 0.004;
+    if(sharodoOn){
+      sharodoLoop.arm();
+      sharodoLoop.step();
+    } else {
+      setPlaying(sharodoA, false);
+      setPlaying(sharodoB, false);
+    }
+    setPlaying(ambientAudio, tgDhak > 0.004);
+  }
+  requestAnimationFrame(mixerFrame);
+
+  /* rAF is throttled in background tabs; timeupdate is not.
+     Keep the seamless loop armed and volumes correct there too. */
+  function sharodoTick(){
+    if(sharodoCur > 0.004 && !sharodoLoop.active.paused){
+      sharodoLoop.arm();
+      sharodoLoop.step();
+    }
+    applyVolumes();
+  }
+  if(sharodoA) sharodoA.addEventListener('timeupdate', sharodoTick);
+  if(sharodoB) sharodoB.addEventListener('timeupdate', sharodoTick);
 
   function syncAudioUI(playing) {
     if (audioToggleBtn) {
@@ -3746,42 +3917,19 @@ body.cinema-widescreen section {
       }
     } catch(e) {}
 
-    var scrollY = window.scrollY || document.documentElement.scrollTop;
-    if (typeof lenis !== 'undefined' && lenis && typeof lenis.scroll === 'number') {
-       scrollY = lenis.scroll;
-    }
-    var maxFadeScroll = (document.documentElement.scrollHeight - window.innerHeight) * 0.9;
-    var progress = Math.min(Math.max(scrollY / (maxFadeScroll || 1), 0), 1);
-    var easeProgress = progress < 0.5 ? 2 * progress * progress : -1 + (4 - 2 * progress) * progress;
-    
-    var chantVol = (1 - easeProgress) * 0.8;
-    var dhakVol = easeProgress * 0.4;
-    
-    if (chantAudio) {
-      try {
-        chantAudio.muted = isAudioMuted;
-        chantAudio.volume = isAudioMuted ? 0 : chantVol;
-        if (!chantHasSeeked && chantAudio.readyState >= 1) {
-          chantAudio.currentTime = 25;
-          chantHasSeeked = true;
-        }
-      } catch(e) {}
-      var playPromise = chantAudio.play();
-      if (playPromise !== undefined) {
-        playPromise.catch(function(){});
-      }
-    }
-    
-    if (ambientAudio) {
-      try {
-        ambientAudio.muted = isAudioMuted;
-        ambientAudio.volume = isAudioMuted ? 0 : dhakVol;
-      } catch(e) {}
-      var playPromise2 = ambientAudio.play();
-      if (playPromise2 !== undefined) {
-        playPromise2.catch(function(){});
-      }
-    }
+    // Unlock EVERY track inside this user gesture, then let the mixer
+    // park the stages that are inaudible at the current scroll position.
+    [chantAudio, sharodoA, sharodoB, ambientAudio].forEach(function(el){
+      if(!el) return;
+      var p = el.play();
+      if(p && p.catch) p.catch(function(){});
+    });
+    setTimeout(function(){
+      var t = stageWeights();
+      if((1 - t.t1) <= 0.004) setPlaying(chantAudio, false);
+      if(t.t1 * (1 - t.t2) <= 0.004){ setPlaying(sharodoA, false); setPlaying(sharodoB, false); }
+      if(t.t2 <= 0.004) setPlaying(ambientAudio, false);
+    }, 80);
 
     firstInteraction = false;
     isAudioPlaying = true;
@@ -3793,7 +3941,7 @@ body.cinema-widescreen section {
     attemptPlay();
   }
 
-  // Safe seek on metadata loaded
+  // Safe seek on metadata loaded (skip the silent opening of Mahalaya)
   if (chantAudio) {
     chantAudio.addEventListener('loadedmetadata', function() {
       if (!chantHasSeeked) {
@@ -3830,41 +3978,9 @@ body.cinema-widescreen section {
         attemptPlay();
       } else {
         isAudioMuted = !isAudioMuted;
-        try { if (chantAudio) chantAudio.muted = isAudioMuted; } catch(e) {}
-        try { if (ambientAudio) ambientAudio.muted = isAudioMuted; } catch(e) {}
-        if (!isAudioMuted) {
-          try { if (chantAudio && chantAudio.paused) chantAudio.play(); } catch(e) {}
-          try { if (ambientAudio && ambientAudio.paused) ambientAudio.play(); } catch(e) {}
-        }
         syncAudioUI(!isAudioMuted);
       }
     });
-  }
-
-  function updateAudioCrossfade() {
-    if (firstInteraction || isAudioMuted) return;
-    
-    var scrollY = window.scrollY || document.documentElement.scrollTop;
-    if (typeof lenis !== 'undefined' && lenis && typeof lenis.scroll === 'number') {
-       scrollY = lenis.scroll;
-    }
-    
-    var maxFadeScroll = (document.documentElement.scrollHeight - window.innerHeight) * 0.9;
-    var progress = Math.min(Math.max(scrollY / (maxFadeScroll || 1), 0), 1);
-    var easeProgress = progress < 0.5 ? 2 * progress * progress : -1 + (4 - 2 * progress) * progress;
-    
-    var chantVol = (1 - easeProgress) * 0.8;
-    var dhakVol = easeProgress * 0.4;
-    
-    try { if (chantAudio) chantAudio.volume = chantVol; } catch(e) {}
-    try { if (ambientAudio) ambientAudio.volume = dhakVol; } catch(e) {}
-  }
-
-  // Attach crossfade to scroll
-  if (typeof lenis !== 'undefined' && lenis) {
-    lenis.on('scroll', updateAudioCrossfade);
-  } else {
-    window.addEventListener('scroll', updateAudioCrossfade, { passive: true });
   }
 
   /* ========================================================
