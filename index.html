@@ -3868,6 +3868,7 @@ body.cinema-widescreen section {
     setPlaying(chantAudio, tgChant > 0.004);
     var sharodoOn = tgSharodo > 0.004;
     if(sharodoOn){
+      setPlaying(sharodoLoop.active, true);
       sharodoLoop.arm();
       sharodoLoop.step();
     } else {
